@@ -1,20 +1,22 @@
 import os
 import sqlite3
+from flask import Flask, request, jsonify  # <-- Importamos Flask para crear el servidor web
 from dotenv import load_dotenv
-import google.generativeai as genai  # <-- Librería oficial de Google Gemini
+import google.generativeai as genai
 
 load_dotenv()
+
+app = Flask(__name__)
 
 # Configurar la API Key de Google Gemini
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Memoria en caché para el historial del chat estructurada para Gemini
-# Formato requerido por Gemini: {"role": "user"|"model", "parts": ["..."]}
+# Memoria global para el chat
 historial_conversacion = []
 
 def inicializar_base_de_datos():
-    """Crea la base de datos local de FerroTecniHN."""
+    """Crea la base de datos local SQLite de FerroTecniHN."""
     conn = sqlite3.connect("ferre_inventario.db")
     cursor = conn.cursor()
     cursor.execute("""
@@ -42,8 +44,10 @@ def inicializar_base_de_datos():
         conn.commit()
     conn.close()
 
+# Inicializamos la base de datos justo al arrancar la aplicación
+inicializar_base_de_datos()
+
 def buscar_productos_relacionados(pregunta_usuario):
-    """Busca productos en la base de datos basados en palabras clave."""
     conn = sqlite3.connect("ferre_inventario.db")
     cursor = conn.cursor()
     palabras = pregunta_usuario.lower().split()
@@ -74,13 +78,25 @@ def buscar_productos_relacionados(pregunta_usuario):
         )
     return inventario_texto
 
-def consultar_chatbot(pregunta_cliente):
+# Ruta de prueba para verificar que el servidor de FerroTecniHN esté encendido
+@app.route("/", methods=["GET"])
+def home():
+    return "¡Servidor de FerroTecniHN activo y corriendo en la nube! 🤖🇭🇳"
+
+# Esta es la ruta (Endpoint) a la que le mandaremos los mensajes
+@app.route("/chat", methods=["POST"])
+def chat():
     global historial_conversacion
     
-    # 1. Buscar inventario relevante
+    # Recibimos el mensaje en formato JSON (por ejemplo: {"mensaje": "hola"})
+    data = request.get_json()
+    pregunta_cliente = data.get("mensaje", "")
+    
+    if not pregunta_cliente:
+        return jsonify({"error": "No enviaste ningún mensaje"}), 400
+        
     contexto_inventario = buscar_productos_relacionados(pregunta_cliente)
     
-    # 2. Configurar el Prompt de Sistema (Instrucciones de comportamiento)
     system_instruction = (
         "Eres el asistente virtual experto de 'FerroTecniHN'. Tu misión es ayudar al cliente a elegir "
         "el producto adecuado para su proyecto y concretar la venta de forma muy amable.\n\n"
@@ -94,44 +110,29 @@ def consultar_chatbot(pregunta_cliente):
     )
     
     try:
-        # 3. Inicializar el modelo Gemini 1.5 Flash pasándole el System Prompt
         model = genai.GenerativeModel(
             model_name="gemini-1.5-flash",
             system_instruction=system_instruction
         )
         
-        # 4. Iniciar el chat pasándole el historial de conversación acumulado
-        chat = model.start_chat(history=historial_conversacion)
-        
-        # 5. Enviar el mensaje actual del usuario y obtener respuesta
-        response = chat.send_message(pregunta_cliente)
+        chat_session = model.start_chat(history=historial_conversacion)
+        response = chat_session.send_message(pregunta_cliente)
         respuesta_ia = response.text
         
-        # 6. Actualizar el historial en el formato interno que Gemini espera para la próxima iteración
+        # Guardamos en la memoria
         historial_conversacion.append({"role": "user", "parts": [pregunta_cliente]})
         historial_conversacion.append({"role": "model", "parts": [respuesta_ia]})
         
-        # Limitar historial a las últimas 15 interacciones para un rendimiento óptimo
         if len(historial_conversacion) > 30:
             historial_conversacion = historial_conversacion[-30:]
             
-        return respuesta_ia
+        # Devolvemos la respuesta en formato JSON para WhatsApp o la Web
+        return jsonify({"respuesta": respuesta_ia})
         
     except Exception as e:
-        return f"Error al procesar con Gemini: {str(e)}"
+        return jsonify({"error": f"Error al procesar con Gemini: {str(e)}"}), 500
 
 if __name__ == "__main__":
-    inicializar_base_de_datos()
-    print("==================================================")
-    print("🤖 ¡Bienvenido al motor de FerroTecniHN! (Versión Google Gemini)")
-    print("Base de datos cargada. Escribe 'salir' para terminar.")
-    print("==================================================\n")
-    
-    while True:
-        pregunta = input("Cliente: ")
-        if pregunta.lower() == "salir":
-            break
-        
-        respuesta = consultar_chatbot(pregunta)
-        print(f"\nFerroTecniHN 🤖:\n{respuesta}\n")
-        print("-" * 50)
+    # Render asigna automáticamente un puerto dinámico, lo leemos de las variables de entorno
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
